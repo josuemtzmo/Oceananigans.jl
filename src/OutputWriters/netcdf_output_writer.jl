@@ -10,7 +10,7 @@ using Oceananigans.Utils: versioninfo_with_gpu, oceananigans_versioninfo, pretty
 using Oceananigans.TimeSteppers: float_or_date_time
 using Oceananigans.Fields: reduced_dimensions, reduced_location, location, validate_indices
 
-mutable struct NetCDFOutputWriter{D, O, T, A} <: AbstractOutputWriter
+mutable struct NetCDFOutputWriter{D, O, T, A, S} <: AbstractOutputWriter
     filepath :: String
     dataset :: D
     outputs :: O
@@ -24,7 +24,7 @@ mutable struct NetCDFOutputWriter{D, O, T, A} <: AbstractOutputWriter
     overwrite_existing :: Bool
     deflatelevel :: Int
     part :: Int
-    max_filesize :: Float64
+    split_file :: S
     verbose :: Bool
 end
 
@@ -173,7 +173,7 @@ end
                            overwrite_existing = false,
                                  deflatelevel = 0,
                                          part = 1,
-                                 max_filesize = Inf,
+                                   split_file = Inf,
                                       verbose = false)
 
 Construct a `NetCDFOutputWriter` that writes `(label, output)` pairs in `outputs` (which should
@@ -222,10 +222,10 @@ Keyword arguments
                   and 9 means maximum compression). See [NCDatasets.jl documentation](https://alexander-barth.github.io/NCDatasets.jl/stable/variables/#Creating-a-variable)
                   for more information.
 
-- `part`: The starting part number used if `max_filesize` is finite.
+- `part`: The starting part number used if `split_file` is finite.
           Default: 1.
 
-- `max_filesize`: The writer will stop writing to the output file once the file size exceeds `max_filesize`,
+- `split_file`: The writer will stop writing to the output file once the file size exceeds `split_file`,
                   and write to a new one with a consistent naming scheme ending in `part1`, `part2`, etc.
                   Defaults to `Inf`.
 
@@ -354,7 +354,7 @@ function NetCDFOutputWriter(model, outputs; filename, schedule,
                            overwrite_existing = nothing,
                                  deflatelevel = 0,
                                          part = 1,
-                                 max_filesize = Inf,
+                                   split_file = Inf,
                                       verbose = false)
     mkpath(dir)
     filename = auto_extension(filename, ".nc")
@@ -415,7 +415,7 @@ function NetCDFOutputWriter(model, outputs; filename, schedule,
                               overwrite_existing,
                               deflatelevel,
                               part,
-                              max_filesize,
+                              split_file,
                               verbose)
 end
 
@@ -478,6 +478,37 @@ function save_output!(ds, output::LagrangianParticles, model, ow, time_index, na
     return nothing
 end
 
+function splitting_file(ow)
+    type_split = typeof(ow.split_file)
+    splitting = false 
+    if type_split == Float64
+        if filesize(ow.filepath) ≥ ow.split_file 
+            splitting = true
+        end
+    elseif type_split == TimeInterval
+        ds = open(ow)
+        if ds.dim["time"] != 0 
+            # Time in the stored file
+            ds_time = ds["time"]
+            first_time = first(ds_time)
+            last_time = last(ds_time)
+            # Time in seconds stored in file
+            time_diff = last_time - first_time
+            interval = ow.split_file.interval
+            schedule = ow.schedule.interval
+            if interval < schedule 
+                throw(ArgumentError("The split_file can not be smaller than the schedule time"))
+            end
+            # Since the index starts at 0, correct by the value in the schedule.
+            if time_diff ≥ (interval - schedule)
+                splitting = true
+            end
+        end
+        close(ds)
+    end
+    return splitting
+end
+
 """
     write_output!(output_writer, model)
 
@@ -486,8 +517,10 @@ every time an output is written to the file.
 """
 function write_output!(ow::NetCDFOutputWriter, model)
     # TODO allow user to split by number of snapshots, rathern than filesize.
-    # Start a new file if the filesize exceeds max_filesize
-    filesize(ow.filepath) ≥ ow.max_filesize && start_next_file(model, ow)
+    # Start a new file if the filesize exceeds the user defined file size in the split_file or the number of snapshots within a file.
+    split_file_bool = splitting_file(ow)
+
+    split_file_bool && start_next_file(model, ow)
 
     ow.dataset = open(ow)
 
@@ -581,7 +614,7 @@ function start_next_file(model, ow::NetCDFOutputWriter)
     verbose = ow.verbose
     sz = filesize(ow.filepath)
     verbose && @info begin
-        "Filesize $(pretty_filesize(sz)) has exceeded maximum file size $(pretty_filesize(ow.max_filesize))."
+        "Filesize $(pretty_filesize(sz)) has exceeded maximum file size $(pretty_filesize(ow.split_file))."
     end
 
     if ow.part == 1
