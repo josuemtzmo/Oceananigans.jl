@@ -2,13 +2,17 @@ using Oceananigans.Fields: validate_indices, Reduction
 using Oceananigans.AbstractOperations: AbstractOperation, ComputedField
 using Oceananigans.Grids: default_indices
 
-restrict_to_interior(::Colon, loc, topo, N) = interior_indices(loc, topo, N)
-restrict_to_interior(::Colon, ::Nothing, topo, N) = UnitRange(1, 1)
-restrict_to_interior(index::UnitRange, ::Nothing, topo, N) = UnitRange(1, 1)
+restrict_to_interior(::Colon, loc, topo, N, H) = interior_indices(loc, topo, N)
+restrict_to_interior(::Colon, ::Nothing, topo, N, H) = UnitRange(1, 1)
+restrict_to_interior(index::UnitRange, ::Nothing, topo, N, H) = UnitRange(1, 1)
 
-function restrict_to_interior(index::UnitRange, loc, topo, N)
+function restrict_to_interior(index::UnitRange, loc, topo, N, H)
     from = max(first(index), 1)
     to = min(last(index), last(interior_indices(loc, topo, N)))
+    if from == to
+        from = 1 - H
+        to   = 1 - H
+    end
     return UnitRange(from, to)
 end
 
@@ -30,12 +34,13 @@ end
 #####
 
 function output_indices(output::Union{AbstractField, Reduction}, grid, indices, with_halos)
-    indices = validate_indices(indices, location(output), grid)
+    indices = validate_indices(output.indices, location(output), grid)
 
     if !with_halos # Maybe chop those indices
         loc = map(instantiate, location(output))
         topo = map(instantiate, topology(grid))
-        indices = map(restrict_to_interior, indices, loc, topo, size(grid))
+        H = (grid.Hx,grid.Hy,grid.Hz)
+        indices = map(restrict_to_interior, indices, loc, topo, size(grid),H)
     end
 
     return indices
